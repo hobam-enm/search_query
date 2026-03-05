@@ -95,14 +95,8 @@ def get_combined_related_keywords(seed_keyword: str) -> pd.DataFrame:
     google_kws = fetch_google_trends_related(seed_keyword)
     
     combined = []
-    seed_clean = seed_keyword.strip().lower()
-
     for kw in naver_kws + google_kws:
-        kw_clean = kw.strip().lower()
-
-        # 1️⃣ seed 포함된 키워드만 허용
-        # 2️⃣ seed 단독은 제거
-        if kw not in combined and seed_clean in kw_clean and kw_clean != seed_clean:
+        if kw not in combined and seed_keyword in kw:
             combined.append(kw)
             
     df = pd.DataFrame({"keyword": combined})
@@ -451,17 +445,24 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
                     "항목": ["분석 키워드", "조회 기간", "드라마 의도 비중", "총 전체 검색량", "총 드라마 의도 검색량"],
                     "내용": [seed_keyword, f"{start_str} ~ {end_str}", f"{p * 100:.2f}%", f"{period_total_abs:,}", f"{period_drama_abs:,}"]
                 })
+                # 엑셀용(전체/드라마 의도 모두 포함)
+                daily_excel_df = total_df[["date", "전체 검색량", "드라마 의도 검색량"]].copy()
+                daily_excel_df.rename(columns={"date": "날짜"}, inplace=True)
 
-                daily_df = total_df[["date", "전체 검색량", "드라마 의도 검색량"]].copy()
-                daily_df.rename(columns={"date": "날짜"}, inplace=True)
-
+                # 차트용(드라마 의도만) + 날짜 표기: M/D (예: 3/4)
+                daily_chart_df = total_df[["date_dt", "드라마 의도 검색량"]].copy()
+                daily_chart_df["날짜"] = daily_chart_df["date_dt"].dt.month.astype(str) + "/" + daily_chart_df["date_dt"].dt.day.astype(str)
+                daily_chart_df = daily_chart_df[["날짜", "드라마 의도 검색량"]]
                 weekly_calc = total_df.copy()
                 if 'week_start' not in weekly_calc.columns:
                     weekly_calc['week_start'] = weekly_calc['date_dt'] - pd.to_timedelta(weekly_calc['date_dt'].dt.dayofweek, unit='d')
                 weekly_grouped = weekly_calc.groupby('week_start')[['전체 검색량', '드라마 의도 검색량']].sum().reset_index()
                 weekly_grouped['주차'] = weekly_grouped['week_start'].dt.month.astype(str) + "월" + weekly_grouped['week_start'].dt.day.astype(str) + "일주차"
-                weekly_df = weekly_grouped[['주차', '전체 검색량', '드라마 의도 검색량']].copy()
+                # 엑셀용(전체/드라마 의도 모두 포함)
+                weekly_excel_df = weekly_grouped[['주차', '전체 검색량', '드라마 의도 검색량']].copy()
 
+                # 차트용(드라마 의도만)
+                weekly_chart_df = weekly_grouped[['주차', '드라마 의도 검색량']].copy()
                 related_abs_df = calculate_related_kws_volume(seed_keyword, backend_df, start_str, end_str, period_total_abs)
                 if not related_abs_df.empty:
                     ox_map = backend_df.set_index("keyword")["is_drama"].map({1: "O", 0: "X"})
@@ -473,8 +474,8 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
                     summary_df.to_excel(writer, sheet_name="요약", index=False)
-                    daily_df.to_excel(writer, sheet_name="일자별 결과", index=False)
-                    weekly_df.to_excel(writer, sheet_name="주차별 결과", index=False)
+                    daily_excel_df.to_excel(writer, sheet_name="일자별 결과", index=False)
+                    weekly_excel_df.to_excel(writer, sheet_name="주차별 결과", index=False)
                     if b_nb_df is not None:
                         b_nb_df[['주차', '구분', '드라마 의도 검색량']].to_excel(writer, sheet_name="방영_비방영_비교", index=False)
                     if not related_abs_df.empty:
@@ -491,8 +492,8 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
 
                 # 상태 업데이트
                 st.session_state.excel_data = output.getvalue()
-                st.session_state.daily_df = daily_df
-                st.session_state.weekly_df = weekly_df
+                st.session_state.daily_df = daily_chart_df
+                st.session_state.weekly_df = weekly_chart_df
                 st.session_state.b_nb_df = b_nb_df
                 st.session_state.p_value = p
                 st.session_state.period_total = period_total_abs
@@ -528,15 +529,15 @@ if st.session_state.analysis_done:
     with col1:
         st.markdown("**일자별 트렌드**")
         fig_daily = px.line(
-            st.session_state.daily_df, 
-            x="날짜", 
-            y=["전체 검색량", "드라마 의도 검색량"],
-            color_discrete_sequence=[COLOR_TOTAL, COLOR_DRAMA]
+            st.session_state.daily_df,
+            x="날짜",
+            y="드라마 의도 검색량",
+            color_discrete_sequence=[COLOR_DRAMA]
         )
         fig_daily.update_layout(
             xaxis_title=None,
             yaxis_title=None,
-            xaxis=dict(nticks=10),
+            xaxis=dict(type="category", nticks=10),
             yaxis=dict(tickformat=","),
             hovermode="x unified",
             legend_title_text="",
@@ -547,11 +548,10 @@ if st.session_state.analysis_done:
     with col2:
         st.markdown("**주차별 트렌드**")
         fig_weekly = px.bar(
-            st.session_state.weekly_df, 
-            x="주차", 
-            y=["전체 검색량", "드라마 의도 검색량"],
-            barmode="group",
-            color_discrete_sequence=[COLOR_TOTAL, COLOR_DRAMA]
+            st.session_state.weekly_df,
+            x="주차",
+            y="드라마 의도 검색량",
+            color_discrete_sequence=[COLOR_DRAMA]
         )
         fig_weekly.update_layout(
             xaxis_title=None,
