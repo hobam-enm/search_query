@@ -95,8 +95,14 @@ def get_combined_related_keywords(seed_keyword: str) -> pd.DataFrame:
     google_kws = fetch_google_trends_related(seed_keyword)
     
     combined = []
+    seed_clean = seed_keyword.strip().lower()
+
     for kw in naver_kws + google_kws:
-        if kw not in combined and seed_keyword in kw:
+        kw_clean = kw.strip().lower()
+
+        # 1️⃣ seed 포함된 키워드만 허용
+        # 2️⃣ seed 단독은 제거
+        if kw not in combined and seed_clean in kw_clean and kw_clean != seed_clean:
             combined.append(kw)
             
     df = pd.DataFrame({"keyword": combined})
