@@ -364,7 +364,7 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
                 start_str = start_date.strftime("%Y-%m-%d")
                 end_str = end_date.strftime("%Y-%m-%d")
 
-                # 체크박스 상태를 백엔드로 넘김 (체크 유지)
+                # 체크박스 상태를 백엔드로 넘김
                 st.session_state.related_kws_df = edited_df
                 backend_df = edited_df.copy()
                 backend_df["is_drama"] = backend_df["드라마 의도 (체크)"].astype(int)
@@ -406,9 +406,14 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
                     total_df["dayofweek"] = total_df["date_dt"].dt.dayofweek
                     total_df["is_broadcast"] = total_df["dayofweek"].isin(target_days)
                     
-                    # 전체 비방영일 검색 비중
-                    non_broadcast_sum = total_df.loc[~total_df["is_broadcast"], "드라마 의도 검색량"].sum()
-                    non_bc_ratio = (non_broadcast_sum / period_drama_abs) if period_drama_abs > 0 else 0
+                    # 방영일 대비 비방영일 평균 검색량 유지율(%) 계산
+                    bc_days = total_df["is_broadcast"].sum()
+                    nbc_days = (~total_df["is_broadcast"]).sum()
+                    
+                    avg_bc = total_df.loc[total_df["is_broadcast"], "드라마 의도 검색량"].sum() / bc_days if bc_days > 0 else 0
+                    avg_nbc = total_df.loc[~total_df["is_broadcast"], "드라마 의도 검색량"].sum() / nbc_days if nbc_days > 0 else 0
+                    
+                    non_bc_ratio = (avg_nbc / avg_bc) if avg_bc > 0 else 0
                     
                     # 주차별 방영일/비방영일 평균 계산
                     total_df['week_start'] = total_df['date_dt'] - pd.to_timedelta(total_df["dayofweek"], unit='d')
@@ -483,10 +488,10 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
 if st.session_state.analysis_done:
     st.markdown("#### 📊 분석 결과 요약")
     
-    # 지표 노출 (드라마 여부에 따라 컬럼 수 조정)
+    # 지표 노출
     if st.session_state.schedule_val != "드라마 아님":
         m1, m2, m3, m4 = st.columns(4)
-        m4.metric(label="비방영일 검색 비중", value=f"{st.session_state.non_bc_ratio * 100:.1f}%")
+        m4.metric(label="방영 대비 검색 유지율", value=f"{st.session_state.non_bc_ratio * 100:.1f}%")
     else:
         m1, m2, m3 = st.columns(3)
 
@@ -496,7 +501,7 @@ if st.session_state.analysis_done:
     
     st.markdown("<br>", unsafe_allow_html=True)
     
-    # 차트 시각화 (톤온톤 컬러 적용)
+    # 차트 시각화
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("**일자별 트렌드**")
@@ -535,29 +540,30 @@ if st.session_state.analysis_done:
         )
         st.plotly_chart(fig_weekly, use_container_width=True)
 
-    # 방영일 vs 비방영일 시각화 (선택 시 노출)
+    # 방영일 vs 비방영일 시각화 (선택 시 노출, 가로 너비 절반 차지하도록 수정)
     if st.session_state.schedule_val != "드라마 아님" and st.session_state.b_nb_df is not None:
         st.markdown("<br>", unsafe_allow_html=True)
-        st.markdown("**주차별 방영일/비방영일 평균 검색량 비교 (드라마 의도)**")
         
-        # 순서 보장을 위해 카테고리화
-        fig_bnb = px.bar(
-            st.session_state.b_nb_df, 
-            x="주차", 
-            y="드라마 의도 검색량", 
-            color="구분",
-            barmode="group",
-            color_discrete_map={"방영일 평균": COLOR_BROADCAST, "비방영일 평균": COLOR_NON_BROADCAST}
-        )
-        fig_bnb.update_layout(
-            xaxis_title=None,
-            yaxis_title=None,
-            yaxis=dict(tickformat=","),
-            legend_title_text="",
-            margin=dict(l=0, r=0, t=30, b=0)
-        )
-        # 차트 너비를 반(col1 자리) 혹은 전체로 지정. 전체(가로로 넓게) 보는 것이 쾌적합니다.
-        st.plotly_chart(fig_bnb, use_container_width=True)
+        # 반만 차지하게 하기 위해 컬럼 분할 후 첫 번째(좌측) 컬럼에 배치
+        col3, col4 = st.columns(2)
+        with col3:
+            st.markdown("**주차별 방영일/비방영일 평균 검색량 비교 (드라마 의도)**")
+            fig_bnb = px.bar(
+                st.session_state.b_nb_df, 
+                x="주차", 
+                y="드라마 의도 검색량", 
+                color="구분",
+                barmode="group",
+                color_discrete_map={"방영일 평균": COLOR_BROADCAST, "비방영일 평균": COLOR_NON_BROADCAST}
+            )
+            fig_bnb.update_layout(
+                xaxis_title=None,
+                yaxis_title=None,
+                yaxis=dict(tickformat=","),
+                legend_title_text="",
+                margin=dict(l=0, r=0, t=30, b=0)
+            )
+            st.plotly_chart(fig_bnb, use_container_width=True)
 
     # 하단 액션 버튼 그룹
     st.divider()
