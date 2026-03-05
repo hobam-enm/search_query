@@ -8,6 +8,7 @@ import streamlit as st
 import requests
 import pandas as pd
 from pytrends.request import TrendReq
+import plotly.express as px  # 시각화 퀄리티 업그레이드용 추가
 
 
 # =========================================================
@@ -32,7 +33,7 @@ DATALAB_URL = "https://openapi.naver.com/v1/datalab/search"
 ANCHOR_MONTH_START = "2026-01-01"
 ANCHOR_MONTH_END = "2026-01-31"
 
-# 앵커 월간 '절대' 검색량
+# 앵커 월간 '절대' 검색량 (요청하신 순수 숫자 형태로 변경)
 ANCHORS = [
     {"group": "anchor_tvn", "keyword": "tvN",      "monthly_volume": 47600},
     {"group": "anchor_nf",  "keyword": "넷플릭스", "monthly_volume": 2353200},
@@ -264,42 +265,54 @@ def compute_drama_share_p_via_datalab(related_csv_df: pd.DataFrame, start_date: 
 
 
 # =========================================================
-# 4) Streamlit UI 및 메인 로직
+# 4) Streamlit UI 및 메인 로직 (세션 상태 활용)
 # =========================================================
 
 st.set_page_config(page_title="드라마 검색량 분석 도구", layout="wide")
 st.title("📈 드라마 검색량 및 의도 분석 도구")
 
-# 세션 상태 초기화 (연관어 데이터 보존용)
+# 다운로드 시 앱이 초기화되는 것을 막기 위한 세션 상태(Session State) 관리
 if "related_kws_df" not in st.session_state:
     st.session_state.related_kws_df = None
+if "analysis_done" not in st.session_state:
+    st.session_state.analysis_done = False
+if "excel_data" not in st.session_state:
+    st.session_state.excel_data = None
+if "daily_df" not in st.session_state:
+    st.session_state.daily_df = None
+if "weekly_df" not in st.session_state:
+    st.session_state.weekly_df = None
+if "p_value" not in st.session_state:
+    st.session_state.p_value = 0.0
 
-with st.sidebar:
-    st.header("1. 기본 설정")
+st.header("1. 기본 설정")
+# 사이드바 제거하고 메인 화면에 단일 라인으로 배치
+col_k, col_s, col_e, col_b = st.columns([2, 1, 1, 1])
+with col_k:
     seed_keyword = st.text_input("분석 키워드", value="세이렌")
+with col_s:
     start_date = st.date_input("시작일", value=dt.date(2026, 2, 1))
+with col_e:
     end_date = st.date_input("종료일", value=dt.date(2026, 3, 5))
-    
-    st.divider()
-    
-    st.header("2. 연관어 추출")
-    if st.button("연관어 가져오기 (자동완성+트렌드)", use_container_width=True):
+with col_b:
+    st.markdown("<div style='margin-top: 28px;'></div>", unsafe_allow_html=True)
+    if st.button("연관어 가져오기", use_container_width=True):
         with st.spinner("연관어를 수집 중입니다..."):
             df_kws = get_combined_related_keywords(seed_keyword)
             if not df_kws.empty:
-                # Streamlit UI에서 체크박스로 쓰기 위해 boolean 컬럼 추가
                 df_kws["드라마 의도 (체크)"] = False 
                 st.session_state.related_kws_df = df_kws
-                st.success("연관어 추출 완료!")
+                st.session_state.analysis_done = False  # 새로운 키워드 검색 시 결과화면 초기화
             else:
                 st.warning("연관어를 찾을 수 없습니다.")
 
-# 메인 화면 영역
-if st.session_state.related_kws_df is not None:
-    st.subheader("💡 연관어 라벨링 (드라마 의도면 체크하세요)")
+st.divider()
+
+# 연관어 라벨링 영역 (분석이 아직 완료되지 않았을 때만 노출)
+if st.session_state.related_kws_df is not None and not st.session_state.analysis_done:
+    st.header("2. 연관어 라벨링")
     st.caption("체크된 항목은 드라마 의도(1), 체크 안 된 항목은 비드라마(0)로 계산됩니다.")
     
-    # st.data_editor를 사용하여 체크박스 형태 제공
     edited_df = st.data_editor(
         st.session_state.related_kws_df,
         column_config={
@@ -310,83 +323,59 @@ if st.session_state.related_kws_df is not None:
         use_container_width=True
     )
 
-    st.divider()
-
     if st.button("🚀 검색량 분석 및 시각화 실행", type="primary"):
-        with st.spinner("데이터랩 트렌드 분석 및 검색량 역산 중..."):
+        with st.spinner("데이터랩 트렌드 분석 및 검색량 역산 중... (시간이 소요될 수 있습니다)"):
             try:
                 start_str = start_date.strftime("%Y-%m-%d")
                 end_str = end_date.strftime("%Y-%m-%d")
 
-                # 1) UI의 boolean 값을 백엔드 로직용 1/0으로 변환
                 backend_df = edited_df.copy()
                 backend_df["is_drama"] = backend_df["드라마 의도 (체크)"].astype(int)
 
-                # 2) p 비율 계산
                 p = compute_drama_share_p_via_datalab(backend_df, start_str, end_str)
                 if pd.isna(p):
                     st.error("계산 오류: 최소 1개 이상의 키워드에 체크를 하거나 해제하여 데이터를 구성해주세요.")
                     st.stop()
                 
-                # 3) 전체 검색량 추정 (1월 1일 보장)
                 anchor_start_dt = pd.to_datetime(ANCHOR_MONTH_START)
                 user_start_dt = pd.to_datetime(start_str)
                 fetch_start_str = min(user_start_dt, anchor_start_dt).strftime("%Y-%m-%d")
                 
                 total_df = estimate_total_abs_timeseries(seed_keyword, fetch_start_str, end_str)
                 
-                # 표시 구간 자르기
                 total_df["date_dt"] = pd.to_datetime(total_df["date"])
                 total_df = total_df[
                     (total_df["date_dt"] >= user_start_dt) & 
                     (total_df["date_dt"] <= pd.to_datetime(end_str))
                 ].copy()
 
-                # 4) 쿼리 계산 (숫자 타입 유지)
                 total_df["전체 쿼리"] = total_df["total_abs_est"].round().astype(int)
                 total_df["드라마 의도 쿼리"] = (total_df["total_abs_est"] * p).round().astype(int)
                 period_total_abs = total_df["전체 쿼리"].sum()
 
-                # --- 데이터프레임 구성 ---
-                
-                # [시트 1: 요약] - 퍼센티지 표기 적용
+                # 결과 데이터 프레임 구성
                 summary_df = pd.DataFrame({
                     "항목": ["분석 키워드", "조회 기간", "드라마 의도 비중"],
                     "내용": [seed_keyword, f"{start_str} ~ {end_str}", f"{p * 100:.2f}%"]
                 })
 
-                # [시트 2: 일자별]
                 daily_df = total_df[["date", "전체 쿼리", "드라마 의도 쿼리"]].copy()
                 daily_df.rename(columns={"date": "날짜"}, inplace=True)
 
-                # [시트 3: 주차별]
                 weekly_calc = total_df.copy()
                 weekly_calc['week_start'] = weekly_calc['date_dt'] - pd.to_timedelta(weekly_calc['date_dt'].dt.dayofweek, unit='d')
                 weekly_grouped = weekly_calc.groupby('week_start')[['전체 쿼리', '드라마 의도 쿼리']].sum().reset_index()
                 weekly_grouped['주차'] = weekly_grouped['week_start'].dt.month.astype(str) + "월" + weekly_grouped['week_start'].dt.day.astype(str) + "일주차"
                 weekly_df = weekly_grouped[['주차', '전체 쿼리', '드라마 의도 쿼리']].copy()
 
-                # [시트 4: 연관어] - O/X 표기 및 볼륨 계산
                 related_abs_df = calculate_related_kws_volume(seed_keyword, backend_df, start_str, end_str, period_total_abs)
                 if not related_abs_df.empty:
                     ox_map = backend_df.set_index("keyword")["is_drama"].map({1: "O", 0: "X"})
                     related_abs_df["드라마 의도"] = related_abs_df["연관어"].map(ox_map).fillna("X")
                     related_abs_df["전체 검색량"] = related_abs_df["전체 검색량"].round().astype(int)
-                    # 컬럼 순서 재배치
                     related_abs_df = related_abs_df[["연관어", "드라마 의도", "전체 검색량"]]
 
-                # --- 대시보드 시각화 ---
-                st.success(f"분석 완료! (적용된 드라마 의도 비중: **{p * 100:.2f}%**)")
-                
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.subheader("일자별 트렌드 (꺾은선)")
-                    st.line_chart(daily_df.set_index("날짜")[["전체 쿼리", "드라마 의도 쿼리"]])
-                with col2:
-                    st.subheader("주차별 트렌드 (막대)")
-                    st.bar_chart(weekly_df.set_index("주차")[["전체 쿼리", "드라마 의도 쿼리"]])
-
-                # --- 엑셀 메모리 저장 및 숫자 포맷팅 ---
+                # 엑셀 바이너리 생성 및 세션 저장
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
                     summary_df.to_excel(writer, sheet_name="요약", index=False)
@@ -395,23 +384,75 @@ if st.session_state.related_kws_df is not None:
                     if not related_abs_df.empty:
                         related_abs_df.to_excel(writer, sheet_name="연관어", index=False)
 
-                    # xlsxwriter 객체를 가져와 엑셀 내부의 '명확한 숫자 + 콤마 포맷' 지정
                     workbook = writer.book
                     format_comma = workbook.add_format({'num_format': '#,##0'})
-                    
-                    # 각 시트의 B, C열(검색량 데이터)에 콤마 포맷 적용
                     writer.sheets['일자별 결과'].set_column('B:C', 15, format_comma)
                     writer.sheets['주차별 결과'].set_column('B:C', 15, format_comma)
                     if not related_abs_df.empty:
                         writer.sheets['연관어'].set_column('C:C', 15, format_comma)
 
-                st.download_button(
-                    label="📥 분석 결과 엑셀 다운로드",
-                    data=output.getvalue(),
-                    file_name=f"search_{seed_keyword}_{dt.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    type="primary"
-                )
+                # 상태 업데이트 및 화면 갱신
+                st.session_state.excel_data = output.getvalue()
+                st.session_state.daily_df = daily_df
+                st.session_state.weekly_df = weekly_df
+                st.session_state.p_value = p
+                st.session_state.analysis_done = True
+                
+                st.rerun()  # 라벨링 화면을 숨기고 결과 화면으로 전환하기 위해 재실행
 
             except Exception as e:
                 st.error(f"오류가 발생했습니다: {str(e)}")
+
+
+# 분석 결과 화면 (라벨링을 숨기고 결과만 노출)
+if st.session_state.analysis_done:
+    st.header("3. 분석 결과")
+    st.success(f"분석이 완료되었습니다! (적용된 드라마 의도 비중: **{st.session_state.p_value * 100:.2f}%**)")
+    
+    # Plotly 시각화 (Hover 툴팁 콤마, X축 자동 간격 조절 적용)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.subheader("일자별 트렌드")
+        fig_daily = px.line(
+            st.session_state.daily_df, 
+            x="날짜", 
+            y=["전체 쿼리", "드라마 의도 쿼리"],
+            labels={"value": "검색량", "variable": "구분"}
+        )
+        fig_daily.update_layout(
+            xaxis=dict(nticks=10),      # x축 날짜 라벨 띄엄띄엄 표시
+            yaxis=dict(tickformat=","), # y축 숫자 콤마 표시
+            hovermode="x unified"       # 마우스 오버 시 보기 편한 통합 툴팁
+        )
+        st.plotly_chart(fig_daily, use_container_width=True)
+
+    with col2:
+        st.subheader("주차별 트렌드")
+        fig_weekly = px.bar(
+            st.session_state.weekly_df, 
+            x="주차", 
+            y=["전체 쿼리", "드라마 의도 쿼리"],
+            barmode="group",
+            labels={"value": "검색량", "variable": "구분"}
+        )
+        fig_weekly.update_layout(
+            yaxis=dict(tickformat=",")
+        )
+        st.plotly_chart(fig_weekly, use_container_width=True)
+
+    # 하단 액션 버튼
+    st.divider()
+    dl_col, reset_col = st.columns([1, 1])
+    with dl_col:
+        st.download_button(
+            label="📥 분석 결과 엑셀 다운로드",
+            data=st.session_state.excel_data,
+            file_name=f"search_{seed_keyword}_{dt.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary",
+            use_container_width=True
+        )
+    with reset_col:
+        if st.button("🔄 라벨링 수정 / 다시 분석하기", use_container_width=True):
+            st.session_state.analysis_done = False
+            st.rerun()
