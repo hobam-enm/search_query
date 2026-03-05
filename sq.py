@@ -39,6 +39,12 @@ ANCHORS = [
     {"group": "anchor_nf",  "keyword": "넷플릭스", "monthly_volume": 2353200},
 ]
 
+# 디자인 톤온톤 컬러 팔레트 설정 (블루/네이비 계열)
+COLOR_TOTAL = "#93C5FD"      # Light Blue (전체 검색량)
+COLOR_DRAMA = "#1E3A8A"      # Deep Blue (드라마 의도 검색량)
+COLOR_BROADCAST = "#3730A3"  # Deep Indigo (방영일 평균)
+COLOR_NON_BROADCAST = "#A5B4FC" # Light Indigo (비방영일 평균)
+
 
 # =========================================================
 # 1) 연관 검색어 추출 (네이버 자동완성 + 구글 트렌드 하이브리드)
@@ -72,14 +78,11 @@ def fetch_google_trends_related(query: str) -> list:
         
         kws = []
         if query in related_payload and related_payload[query] is not None:
-            # 인기 검색어 순으로 추가
             if 'top' in related_payload[query] and related_payload[query]['top'] is not None:
                 kws.extend(related_payload[query]['top']['query'].tolist())
-            # 급상승 검색어 순으로 추가
             if 'rising' in related_payload[query] and related_payload[query]['rising'] is not None:
                 kws.extend(related_payload[query]['rising']['query'].tolist())
         
-        # 중복 제거 후 상위 20개까지만 절삭하여 반환
         unique_kws = list(dict.fromkeys(kws))
         return unique_kws[:20]
     except Exception as e:
@@ -93,7 +96,6 @@ def get_combined_related_keywords(seed_keyword: str) -> pd.DataFrame:
     
     combined = []
     for kw in naver_kws + google_kws:
-        # 검색 키워드가 명확히 포함된 연관어만 추출하고, 중복을 제거
         if kw not in combined and seed_keyword in kw:
             combined.append(kw)
             
@@ -216,7 +218,6 @@ def calculate_related_kws_volume(seed_keyword: str, related_df: pd.DataFrame, st
                 else:
                     results.append({"연관어": kw, "전체 검색량": 0})
         except Exception as e:
-            print(f"연관어 DataLab 오류 ({chunk}): {e}")
             for kw in chunk:
                 results.append({"연관어": kw, "전체 검색량": 0})
 
@@ -276,10 +277,9 @@ def compute_drama_share_p_via_datalab(related_csv_df: pd.DataFrame, start_date: 
 
 st.set_page_config(page_title="드라마 검색량 분석 도구", page_icon="📈", layout="wide")
 
-# 타이틀을 세련되게 가운데 정렬
-st.markdown("<h2 style='text-align: center; color: #1f77b4; margin-bottom: 30px;'>📈 드라마 검색량 및 의도 분석 도구</h2>", unsafe_allow_html=True)
+st.markdown(f"<h2 style='text-align: center; color: {COLOR_DRAMA}; margin-bottom: 30px;'>📈 드라마 검색량 및 의도 분석 도구</h2>", unsafe_allow_html=True)
 
-# 세션 상태(Session State) 초기화
+# 세션 상태 초기화
 if "related_kws_df" not in st.session_state:
     st.session_state.related_kws_df = None
 if "analysis_done" not in st.session_state:
@@ -290,19 +290,27 @@ if "daily_df" not in st.session_state:
     st.session_state.daily_df = None
 if "weekly_df" not in st.session_state:
     st.session_state.weekly_df = None
+if "b_nb_df" not in st.session_state:
+    st.session_state.b_nb_df = None
 if "p_value" not in st.session_state:
     st.session_state.p_value = 0.0
 if "period_total" not in st.session_state:
     st.session_state.period_total = 0
 if "period_drama" not in st.session_state:
     st.session_state.period_drama = 0
+if "non_bc_ratio" not in st.session_state:
+    st.session_state.non_bc_ratio = 0.0
+if "schedule_val" not in st.session_state:
+    st.session_state.schedule_val = "드라마 아님"
 
-# --- 설정 박스 (깔끔한 컨테이너 UI) ---
+# --- 설정 박스 ---
 with st.container(border=True):
     st.markdown("#### ⚙️ 분석 기본 설정")
-    col_k, col_s, col_e, col_b = st.columns([2, 1, 1, 1.2])
+    col_k, col_d, col_s, col_e, col_b = st.columns([1.5, 1, 1, 1, 1.2])
     with col_k:
         seed_keyword = st.text_input("분석 키워드", value="세이렌", label_visibility="collapsed", placeholder="키워드 입력 (예: 세이렌)")
+    with col_d:
+        schedule = st.selectbox("방영 요일", ["드라마 아님", "월화", "수목", "토일"], label_visibility="collapsed")
     with col_s:
         start_date = st.date_input("시작일", value=dt.date(2026, 2, 1), label_visibility="collapsed")
     with col_e:
@@ -318,6 +326,7 @@ with st.container(border=True):
                         df_kws["드라마 의도 (체크)"] = False 
                         st.session_state.related_kws_df = df_kws
                         st.session_state.analysis_done = False
+                        st.session_state.schedule_val = schedule
                     else:
                         st.warning("조건에 맞는 연관어를 찾을 수 없습니다.")
 
@@ -326,12 +335,21 @@ st.markdown("<br>", unsafe_allow_html=True)
 # --- 연관어 라벨링 영역 (진행 중일 때만 노출) ---
 if st.session_state.related_kws_df is not None and not st.session_state.analysis_done:
     st.markdown("#### 💡 연관어 라벨링")
-    st.caption("드라마를 의미하는 검색어에만 체크해주세요. (체크 시 1, 해제 시 0 반영)")
+    st.caption("드라마를 의미하는 검색어에만 체크해주세요.")
     
+    # 모두 선택 / 모두 해제 버튼
+    col_btn1, col_btn2, _ = st.columns([1.5, 1.5, 7])
+    if col_btn1.button("✅ 모두 선택", use_container_width=True):
+        st.session_state.related_kws_df["드라마 의도 (체크)"] = True
+        st.rerun()
+    if col_btn2.button("🔲 모두 해제", use_container_width=True):
+        st.session_state.related_kws_df["드라마 의도 (체크)"] = False
+        st.rerun()
+
     edited_df = st.data_editor(
         st.session_state.related_kws_df,
         column_config={
-            "드라마 의도 (체크)": st.column_config.CheckboxColumn("드라마 의도", help="드라마를 의미하면 체크", width="small"),
+            "드라마 의도 (체크)": st.column_config.CheckboxColumn("드라마 의도", width="small"),
             "keyword": st.column_config.TextColumn("연관어", disabled=True)
         },
         hide_index=True,
@@ -346,6 +364,8 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
                 start_str = start_date.strftime("%Y-%m-%d")
                 end_str = end_date.strftime("%Y-%m-%d")
 
+                # 체크박스 상태를 백엔드로 넘김 (체크 유지)
+                st.session_state.related_kws_df = edited_df
                 backend_df = edited_df.copy()
                 backend_df["is_drama"] = backend_df["드라마 의도 (체크)"].astype(int)
 
@@ -354,7 +374,6 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
                     st.error("계산 오류: 최소 1개 이상의 키워드에 체크를 하거나 해제하여 데이터를 구성해주세요.")
                     st.stop()
                 
-                # 기간 역전 버그 수정: 앵커 데이터랩 호출을 위해 가장 넓은 범위를 산정
                 user_start_dt = pd.to_datetime(start_str)
                 user_end_dt = pd.to_datetime(end_str)
                 anchor_start_dt = pd.to_datetime(ANCHOR_MONTH_START)
@@ -365,32 +384,56 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
                 
                 total_df = estimate_total_abs_timeseries(seed_keyword, fetch_start_str, fetch_end_str)
                 
-                # 유저가 요청한 기간만큼 결과 데이터 프레임 자르기
                 total_df["date_dt"] = pd.to_datetime(total_df["date"])
                 total_df = total_df[
                     (total_df["date_dt"] >= user_start_dt) & 
                     (total_df["date_dt"] <= user_end_dt)
                 ].copy()
 
-                total_df["전체 쿼리"] = total_df["total_abs_est"].round().astype(int)
-                total_df["드라마 의도 쿼리"] = (total_df["total_abs_est"] * p).round().astype(int)
-                period_total_abs = int(total_df["전체 쿼리"].sum())
-                period_drama_abs = int(total_df["드라마 의도 쿼리"].sum())
+                total_df["전체 검색량"] = total_df["total_abs_est"].round().astype(int)
+                total_df["드라마 의도 검색량"] = (total_df["total_abs_est"] * p).round().astype(int)
+                period_total_abs = int(total_df["전체 검색량"].sum())
+                period_drama_abs = int(total_df["드라마 의도 검색량"].sum())
 
-                # 결과 데이터 프레임 구성
+                # --- 방영일/비방영일 로직 처리 ---
+                non_bc_ratio = 0.0
+                b_nb_df = None
+                
+                if st.session_state.schedule_val != "드라마 아님":
+                    schedule_map = {"월화": [0, 1], "수목": [2, 3], "토일": [5, 6]}
+                    target_days = schedule_map[st.session_state.schedule_val]
+                    
+                    total_df["dayofweek"] = total_df["date_dt"].dt.dayofweek
+                    total_df["is_broadcast"] = total_df["dayofweek"].isin(target_days)
+                    
+                    # 전체 비방영일 검색 비중
+                    non_broadcast_sum = total_df.loc[~total_df["is_broadcast"], "드라마 의도 검색량"].sum()
+                    non_bc_ratio = (non_broadcast_sum / period_drama_abs) if period_drama_abs > 0 else 0
+                    
+                    # 주차별 방영일/비방영일 평균 계산
+                    total_df['week_start'] = total_df['date_dt'] - pd.to_timedelta(total_df["dayofweek"], unit='d')
+                    total_df['주차'] = total_df['week_start'].dt.month.astype(str) + "월" + total_df['week_start'].dt.day.astype(str) + "일주차"
+                    
+                    b_nb_raw = total_df.groupby(['주차', 'is_broadcast', 'week_start'])['드라마 의도 검색량'].mean().reset_index()
+                    b_nb_raw["구분"] = b_nb_raw["is_broadcast"].map({True: "방영일 평균", False: "비방영일 평균"})
+                    b_nb_raw["드라마 의도 검색량"] = b_nb_raw["드라마 의도 검색량"].round().astype(int)
+                    b_nb_df = b_nb_raw.sort_values('week_start')
+
+                # --- 결과 데이터 프레임 구성 ---
                 summary_df = pd.DataFrame({
                     "항목": ["분석 키워드", "조회 기간", "드라마 의도 비중", "총 전체 검색량", "총 드라마 의도 검색량"],
                     "내용": [seed_keyword, f"{start_str} ~ {end_str}", f"{p * 100:.2f}%", f"{period_total_abs:,}", f"{period_drama_abs:,}"]
                 })
 
-                daily_df = total_df[["date", "전체 쿼리", "드라마 의도 쿼리"]].copy()
+                daily_df = total_df[["date", "전체 검색량", "드라마 의도 검색량"]].copy()
                 daily_df.rename(columns={"date": "날짜"}, inplace=True)
 
                 weekly_calc = total_df.copy()
-                weekly_calc['week_start'] = weekly_calc['date_dt'] - pd.to_timedelta(weekly_calc['date_dt'].dt.dayofweek, unit='d')
-                weekly_grouped = weekly_calc.groupby('week_start')[['전체 쿼리', '드라마 의도 쿼리']].sum().reset_index()
+                if 'week_start' not in weekly_calc.columns:
+                    weekly_calc['week_start'] = weekly_calc['date_dt'] - pd.to_timedelta(weekly_calc['date_dt'].dt.dayofweek, unit='d')
+                weekly_grouped = weekly_calc.groupby('week_start')[['전체 검색량', '드라마 의도 검색량']].sum().reset_index()
                 weekly_grouped['주차'] = weekly_grouped['week_start'].dt.month.astype(str) + "월" + weekly_grouped['week_start'].dt.day.astype(str) + "일주차"
-                weekly_df = weekly_grouped[['주차', '전체 쿼리', '드라마 의도 쿼리']].copy()
+                weekly_df = weekly_grouped[['주차', '전체 검색량', '드라마 의도 검색량']].copy()
 
                 related_abs_df = calculate_related_kws_volume(seed_keyword, backend_df, start_str, end_str, period_total_abs)
                 if not related_abs_df.empty:
@@ -399,12 +442,14 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
                     related_abs_df["전체 검색량"] = related_abs_df["전체 검색량"].round().astype(int)
                     related_abs_df = related_abs_df[["연관어", "드라마 의도", "전체 검색량"]]
 
-                # 엑셀 바이너리 생성 및 세션 저장
+                # 엑셀 바이너리 생성
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
                     summary_df.to_excel(writer, sheet_name="요약", index=False)
                     daily_df.to_excel(writer, sheet_name="일자별 결과", index=False)
                     weekly_df.to_excel(writer, sheet_name="주차별 결과", index=False)
+                    if b_nb_df is not None:
+                        b_nb_df[['주차', '구분', '드라마 의도 검색량']].to_excel(writer, sheet_name="방영_비방영_비교", index=False)
                     if not related_abs_df.empty:
                         related_abs_df.to_excel(writer, sheet_name="연관어", index=False)
 
@@ -412,6 +457,8 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
                     format_comma = workbook.add_format({'num_format': '#,##0'})
                     writer.sheets['일자별 결과'].set_column('B:C', 15, format_comma)
                     writer.sheets['주차별 결과'].set_column('B:C', 15, format_comma)
+                    if b_nb_df is not None:
+                        writer.sheets['방영_비방영_비교'].set_column('C:C', 15, format_comma)
                     if not related_abs_df.empty:
                         writer.sheets['연관어'].set_column('C:C', 15, format_comma)
 
@@ -419,9 +466,11 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
                 st.session_state.excel_data = output.getvalue()
                 st.session_state.daily_df = daily_df
                 st.session_state.weekly_df = weekly_df
+                st.session_state.b_nb_df = b_nb_df
                 st.session_state.p_value = p
                 st.session_state.period_total = period_total_abs
                 st.session_state.period_drama = period_drama_abs
+                st.session_state.non_bc_ratio = non_bc_ratio
                 st.session_state.analysis_done = True
                 
                 st.rerun()
@@ -434,28 +483,34 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
 if st.session_state.analysis_done:
     st.markdown("#### 📊 분석 결과 요약")
     
-    # 세련된 Metric UI 활용
-    m1, m2, m3 = st.columns(3)
-    m1.metric(label="총 전체 쿼리", value=f"{st.session_state.period_total:,}회")
-    m2.metric(label="총 드라마 의도 쿼리", value=f"{st.session_state.period_drama:,}회")
+    # 지표 노출 (드라마 여부에 따라 컬럼 수 조정)
+    if st.session_state.schedule_val != "드라마 아님":
+        m1, m2, m3, m4 = st.columns(4)
+        m4.metric(label="비방영일 검색 비중", value=f"{st.session_state.non_bc_ratio * 100:.1f}%")
+    else:
+        m1, m2, m3 = st.columns(3)
+
+    m1.metric(label="총 전체 검색량", value=f"{st.session_state.period_total:,}회")
+    m2.metric(label="총 드라마 의도 검색량", value=f"{st.session_state.period_drama:,}회")
     m3.metric(label="드라마 의도 비중", value=f"{st.session_state.p_value * 100:.1f}%")
     
     st.markdown("<br>", unsafe_allow_html=True)
     
+    # 차트 시각화 (톤온톤 컬러 적용)
     col1, col2 = st.columns(2)
     with col1:
         st.markdown("**일자별 트렌드**")
         fig_daily = px.line(
             st.session_state.daily_df, 
             x="날짜", 
-            y=["전체 쿼리", "드라마 의도 쿼리"],
-            color_discrete_sequence=["#1f77b4", "#ff7f0e"] # 깔끔한 색상 지정
+            y=["전체 검색량", "드라마 의도 검색량"],
+            color_discrete_sequence=[COLOR_TOTAL, COLOR_DRAMA]
         )
         fig_daily.update_layout(
             xaxis_title=None,
             yaxis_title=None,
-            xaxis=dict(nticks=10),      # x축 띄엄띄엄 표시
-            yaxis=dict(tickformat=","), # y축 콤마 표시
+            xaxis=dict(nticks=10),
+            yaxis=dict(tickformat=","),
             hovermode="x unified",
             legend_title_text="",
             margin=dict(l=0, r=0, t=30, b=0)
@@ -467,9 +522,9 @@ if st.session_state.analysis_done:
         fig_weekly = px.bar(
             st.session_state.weekly_df, 
             x="주차", 
-            y=["전체 쿼리", "드라마 의도 쿼리"],
+            y=["전체 검색량", "드라마 의도 검색량"],
             barmode="group",
-            color_discrete_sequence=["#1f77b4", "#ff7f0e"]
+            color_discrete_sequence=[COLOR_TOTAL, COLOR_DRAMA]
         )
         fig_weekly.update_layout(
             xaxis_title=None,
@@ -479,6 +534,30 @@ if st.session_state.analysis_done:
             margin=dict(l=0, r=0, t=30, b=0)
         )
         st.plotly_chart(fig_weekly, use_container_width=True)
+
+    # 방영일 vs 비방영일 시각화 (선택 시 노출)
+    if st.session_state.schedule_val != "드라마 아님" and st.session_state.b_nb_df is not None:
+        st.markdown("<br>", unsafe_allow_html=True)
+        st.markdown("**주차별 방영일/비방영일 평균 검색량 비교 (드라마 의도)**")
+        
+        # 순서 보장을 위해 카테고리화
+        fig_bnb = px.bar(
+            st.session_state.b_nb_df, 
+            x="주차", 
+            y="드라마 의도 검색량", 
+            color="구분",
+            barmode="group",
+            color_discrete_map={"방영일 평균": COLOR_BROADCAST, "비방영일 평균": COLOR_NON_BROADCAST}
+        )
+        fig_bnb.update_layout(
+            xaxis_title=None,
+            yaxis_title=None,
+            yaxis=dict(tickformat=","),
+            legend_title_text="",
+            margin=dict(l=0, r=0, t=30, b=0)
+        )
+        # 차트 너비를 반(col1 자리) 혹은 전체로 지정. 전체(가로로 넓게) 보는 것이 쾌적합니다.
+        st.plotly_chart(fig_bnb, use_container_width=True)
 
     # 하단 액션 버튼 그룹
     st.divider()
