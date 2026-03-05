@@ -364,7 +364,6 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
                 start_str = start_date.strftime("%Y-%m-%d")
                 end_str = end_date.strftime("%Y-%m-%d")
 
-                # 체크박스 상태를 백엔드로 넘김
                 st.session_state.related_kws_df = edited_df
                 backend_df = edited_df.copy()
                 backend_df["is_drama"] = backend_df["드라마 의도 (체크)"].astype(int)
@@ -406,19 +405,36 @@ if st.session_state.related_kws_df is not None and not st.session_state.analysis
                     total_df["dayofweek"] = total_df["date_dt"].dt.dayofweek
                     total_df["is_broadcast"] = total_df["dayofweek"].isin(target_days)
                     
-                    # 방영일 대비 비방영일 평균 검색량 유지율(%) 계산
-                    bc_days = total_df["is_broadcast"].sum()
-                    nbc_days = (~total_df["is_broadcast"]).sum()
-                    
-                    avg_bc = total_df.loc[total_df["is_broadcast"], "드라마 의도 검색량"].sum() / bc_days if bc_days > 0 else 0
-                    avg_nbc = total_df.loc[~total_df["is_broadcast"], "드라마 의도 검색량"].sum() / nbc_days if nbc_days > 0 else 0
-                    
-                    non_bc_ratio = (avg_nbc / avg_bc) if avg_bc > 0 else 0
-                    
-                    # 주차별 방영일/비방영일 평균 계산
+                    # 주차 계산 (월요일 시작)
                     total_df['week_start'] = total_df['date_dt'] - pd.to_timedelta(total_df["dayofweek"], unit='d')
                     total_df['주차'] = total_df['week_start'].dt.month.astype(str) + "월" + total_df['week_start'].dt.day.astype(str) + "일주차"
                     
+                    # 온전한 7일치 데이터가 있는 주차만 필터링하여 비방영일 검색 유지율 계산
+                    full_weeks_count = total_df.groupby('week_start').size()
+                    full_weeks = full_weeks_count[full_weeks_count == 7].index
+                    
+                    if len(full_weeks) > 0:
+                        ratio_list = []
+                        for w in full_weeks:
+                            w_df = total_df[total_df['week_start'] == w]
+                            avg_bc = w_df.loc[w_df["is_broadcast"], "드라마 의도 검색량"].mean()
+                            avg_nbc = w_df.loc[~w_df["is_broadcast"], "드라마 의도 검색량"].mean()
+                            if pd.notna(avg_bc) and avg_bc > 0 and pd.notna(avg_nbc):
+                                ratio_list.append(avg_nbc / avg_bc)
+                        if ratio_list:
+                            non_bc_ratio = sum(ratio_list) / len(ratio_list)
+                        else:
+                            non_bc_ratio = 0.0
+                    else:
+                        # 7일이 꽉 찬 주차가 없을 경우 전체 기간 평균으로 Fallback 계산
+                        avg_bc_total = total_df.loc[total_df["is_broadcast"], "드라마 의도 검색량"].mean()
+                        avg_nbc_total = total_df.loc[~total_df["is_broadcast"], "드라마 의도 검색량"].mean()
+                        if pd.notna(avg_bc_total) and avg_bc_total > 0 and pd.notna(avg_nbc_total):
+                            non_bc_ratio = avg_nbc_total / avg_bc_total
+                        else:
+                            non_bc_ratio = 0.0
+
+                    # 주차별 방영일/비방영일 평균 시각화용 데이터
                     b_nb_raw = total_df.groupby(['주차', 'is_broadcast', 'week_start'])['드라마 의도 검색량'].mean().reset_index()
                     b_nb_raw["구분"] = b_nb_raw["is_broadcast"].map({True: "방영일 평균", False: "비방영일 평균"})
                     b_nb_raw["드라마 의도 검색량"] = b_nb_raw["드라마 의도 검색량"].round().astype(int)
@@ -491,7 +507,7 @@ if st.session_state.analysis_done:
     # 지표 노출
     if st.session_state.schedule_val != "드라마 아님":
         m1, m2, m3, m4 = st.columns(4)
-        m4.metric(label="방영 대비 검색 유지율", value=f"{st.session_state.non_bc_ratio * 100:.1f}%")
+        m4.metric(label="비방영일 검색 유지율", value=f"{st.session_state.non_bc_ratio * 100:.1f}%")
     else:
         m1, m2, m3 = st.columns(3)
 
@@ -540,13 +556,13 @@ if st.session_state.analysis_done:
         )
         st.plotly_chart(fig_weekly, use_container_width=True)
 
-    # 방영일 vs 비방영일 시각화 (선택 시 노출, 가로 너비 절반 차지하도록 수정)
+    # 방영일 vs 비방영일 시각화 (선택 시 노출, 가로 너비 절반 차지하도록 확실히 강제)
     if st.session_state.schedule_val != "드라마 아님" and st.session_state.b_nb_df is not None:
         st.markdown("<br>", unsafe_allow_html=True)
         
-        # 반만 차지하게 하기 위해 컬럼 분할 후 첫 번째(좌측) 컬럼에 배치
-        col3, col4 = st.columns(2)
-        with col3:
+        # 확실히 절반만 사용하도록 컨테이너 분리 (오른쪽은 비워둠)
+        col_left, col_right = st.columns(2)
+        with col_left:
             st.markdown("**주차별 방영일/비방영일 평균 검색량 비교 (드라마 의도)**")
             fig_bnb = px.bar(
                 st.session_state.b_nb_df, 
