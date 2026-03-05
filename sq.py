@@ -35,7 +35,7 @@ ANCHOR_MONTH_END = "2026-01-31"
 # 앵커 월간 '절대' 검색량
 ANCHORS = [
     {"group": "anchor_tvn", "keyword": "tvN",      "monthly_volume": 47600},
-    {"group": "anchor_nf",  "keyword": "넷플릭스", "monthly_volume": 2_353_200},
+    {"group": "anchor_nf",  "keyword": "넷플릭스", "monthly_volume": 2353200},
 ]
 
 
