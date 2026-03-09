@@ -277,6 +277,141 @@ def compute_drama_share_p_via_datalab(related_csv_df: pd.DataFrame, start_date: 
 
 st.set_page_config(page_title="드라마 검색량 분석 도구", page_icon="📈", layout="wide")
 
+# ===== 사이드바 및 어드민 페이지 라우팅 =====
+st.sidebar.title("네비게이션")
+page_selection = st.sidebar.radio("메뉴 선택", ["메인 대시보드", "어드민 데이터 추출"], label_visibility="collapsed")
+
+if page_selection == "어드민 데이터 추출":
+    st.markdown(f"<h2 style='text-align: center; color: {COLOR_DRAMA}; margin-bottom: 30px;'>🔒 어드민 일괄 데이터 추출 (W-6)</h2>", unsafe_allow_html=True)
+    
+    # 어드민 비밀번호 검증
+    admin_pw = st.sidebar.text_input("비밀번호 입력", type="password")
+    if admin_pw != "admin8888":
+        st.warning("접근 권한이 없습니다. 사이드바에 올바른 비밀번호를 입력해주세요.")
+        st.stop() # 검증 실패 시 기존 메인 대시보드 렌더링 방지
+        
+    # =========================================================
+    # 5) 어드민 전용: CSV 기반 과거 데이터 일괄 추출
+    # =========================================================
+    st.info("CSV 파일을 업로드하면 기입된 방영 기간을 기준으로 **방영시작일 기준 W-6부터 방영 종료 주차까지**의 일자별/주차별 검색량을 추출합니다.")
+    st.markdown("- **1열(A열)**: 드라마명 (검색 키워드)\n- **2열(B열)**: 방영시작일~방영종료일 (예: `2025.10.11. ~ 2025.11.30`)")
+    
+    uploaded_file = st.file_uploader("CSV 파일 업로드 (헤더 유무 무관)", type=["csv"])
+    
+    if uploaded_file is not None:
+        admin_df = pd.read_csv(uploaded_file, header=None)
+        
+        if st.button("🚀 전체 키워드 데이터 추출", type="primary", use_container_width=True):
+            with st.spinner("API를 통해 데이터를 일괄 추출 중입니다. (키워드 수에 따라 수분이 소요될 수 있습니다)"):
+                daily_results = []
+                weekly_results = []
+                
+                # 정규식을 활용한 날짜 추출 함수 (구분자 무관하게 숫자만 안정적으로 추출)
+                def parse_dates_from_string(date_str):
+                    matches = re.findall(r'(\d{4})\D+(\d{1,2})\D+(\d{1,2})', str(date_str))
+                    if len(matches) >= 2:
+                        s_dt = pd.to_datetime(f"{matches[0][0]}-{matches[0][1]}-{matches[0][2]}")
+                        e_dt = pd.to_datetime(f"{matches[1][0]}-{matches[1][1]}-{matches[1][2]}")
+                        return s_dt, e_dt
+                    return pd.NaT, pd.NaT
+
+                # 각 키워드별 API 호출 및 집계 진행
+                for idx, row in admin_df.iterrows():
+                    if pd.isna(row[0]) or pd.isna(row[1]):
+                        continue
+                        
+                    kw = str(row[0]).strip()
+                    date_str = str(row[1]).strip()
+                    start_dt, end_dt = parse_dates_from_string(date_str)
+                    
+                    if pd.isna(start_dt) or pd.isna(end_dt):
+                        st.warning(f"[{kw}] 날짜 파싱 오류로 건너뜁니다: {date_str}")
+                        continue
+                        
+                    # W-6 및 방영종료 주차 경계 계산 (주차는 '월요일' 시작 기준)
+                    start_monday = start_dt - pd.Timedelta(days=start_dt.dayofweek)
+                    fetch_start_dt = start_monday - pd.Timedelta(weeks=6) # 방영시작주 기준 W-6 월요일
+                    fetch_end_dt = end_dt + pd.Timedelta(days=6 - end_dt.dayofweek) # 방영종료주 일요일
+                    
+                    # 앵커 데이터 조회를 위해 요청 API 기간 확장
+                    anchor_start_dt = pd.to_datetime(ANCHOR_MONTH_START)
+                    anchor_end_dt = pd.to_datetime(ANCHOR_MONTH_END)
+                    api_start_str = min(fetch_start_dt, anchor_start_dt).strftime("%Y-%m-%d")
+                    api_end_str = max(fetch_end_dt, anchor_end_dt).strftime("%Y-%m-%d")
+                    
+                    try:
+                        # 전체 데이터(앵커 포함) 수집
+                        kw_total_df = estimate_total_abs_timeseries(kw, api_start_str, api_end_str)
+                        kw_total_df["date_dt"] = pd.to_datetime(kw_total_df["date"])
+                        
+                        # 실제 요구되는 타겟 기간으로 필터링
+                        target_df = kw_total_df[
+                            (kw_total_df["date_dt"] >= fetch_start_dt) & 
+                            (kw_total_df["date_dt"] <= fetch_end_dt)
+                        ].copy()
+                        
+                        target_df["드라마명"] = kw
+                        target_df["전체 검색량"] = target_df["total_abs_est"].round().astype(int)
+                        
+                        # 요일 직접 맵핑 (별도 행 표기 요구사항 반영)
+                        day_map = {0: '월요일', 1: '화요일', 2: '수요일', 3: '목요일', 4: '금요일', 5: '토요일', 6: '일요일'}
+                        target_df["요일"] = target_df["date_dt"].dt.dayofweek.map(day_map)
+                        
+                        # 1) 일자별 결과 
+                        daily_part = target_df[["드라마명", "date", "요일", "전체 검색량"]].copy()
+                        daily_part.rename(columns={"date": "날짜"}, inplace=True)
+                        daily_results.append(daily_part)
+                        
+                        # 2) 주차별 결과 구성 (W-6, W-5 ... 형태 표기)
+                        target_df['week_start'] = target_df['date_dt'] - pd.to_timedelta(target_df['date_dt'].dt.dayofweek, unit='d')
+                        target_df['relative_weeks'] = ((target_df['week_start'] - start_monday).dt.days // 7)
+                        
+                        def get_week_label(w):
+                            if w < 0: return f"W{w}"
+                            elif w == 0: return "W0 (방영시작주)"
+                            else: return f"W+{w}"
+                            
+                        target_df['주차 표기'] = target_df['relative_weeks'].apply(get_week_label)
+                        target_df['주간 시작일'] = target_df['week_start'].dt.strftime("%Y-%m-%d")
+                        
+                        weekly_grouped = target_df.groupby(['드라마명', '주차 표기', '주간 시작일'])['전체 검색량'].sum().reset_index()
+                        weekly_grouped = weekly_grouped.sort_values(by='주간 시작일')
+                        weekly_results.append(weekly_grouped)
+                        
+                    except Exception as e:
+                        st.error(f"[{kw}] 조회 중 에러: {str(e)}")
+                        
+                # 추출 완료 후 메모리에 엑셀 파일 쓰기
+                if daily_results and weekly_results:
+                    final_daily_df = pd.concat(daily_results, ignore_index=True)
+                    final_weekly_df = pd.concat(weekly_results, ignore_index=True)
+                    
+                    output = io.BytesIO()
+                    with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
+                        final_daily_df.to_excel(writer, sheet_name="일자별 전체검색량", index=False)
+                        final_weekly_df.to_excel(writer, sheet_name="주차별 전체검색량", index=False)
+                        
+                        # 엑셀 셀 천단위 콤마 포맷팅
+                        workbook = writer.book
+                        format_comma = workbook.add_format({'num_format': '#,##0'})
+                        writer.sheets['일자별 전체검색량'].set_column('D:D', 15, format_comma)
+                        writer.sheets['주차별 전체검색량'].set_column('D:D', 15, format_comma)
+                        
+                    st.success("데이터 일괄 추출이 완료되었습니다! 아래 버튼을 눌러 다운로드하세요.")
+                    st.download_button(
+                        label="📥 통합 엑셀(Excel) 다운로드",
+                        data=output.getvalue(),
+                        file_name=f"admin_batch_volume_{dt.datetime.now().strftime('%Y%m%d_%H%M')}.xlsx",
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        type="primary",
+                        use_container_width=True
+                    )
+                else:
+                    st.warning("추출에 성공한 데이터가 없습니다. CSV 양식이나 로그를 확인해주세요.")
+                    
+    st.stop() # 어드민 페이지 렌더링 후 기존 대시보드가 그려지지 않도록 종료
+
+# 기존 메인 대시보드 로직 (위의 st.stop() 덕분에 메인 대시보드 선택 시에만 실행됨)
 st.markdown(f"<h2 style='text-align: center; color: {COLOR_DRAMA}; margin-bottom: 30px;'>📈 드라마 검색량 및 의도 분석 도구</h2>", unsafe_allow_html=True)
 
 # 세션 상태 초기화
