@@ -305,6 +305,7 @@ if page_selection == "어드민 데이터 추출":
             with st.spinner("API를 통해 데이터를 일괄 추출 중입니다. (키워드 수에 따라 수분이 소요될 수 있습니다)"):
                 daily_results = []
                 weekly_results = []
+                pre_bc_results = []
                 
                 # 정규식을 활용한 날짜 추출 함수 (구분자 무관하게 숫자만 안정적으로 추출)
                 def parse_dates_from_string(date_str):
@@ -361,6 +362,18 @@ if page_selection == "어드민 데이터 추출":
                         daily_part = target_df[["드라마명", "date", "요일", "전체 검색량"]].copy()
                         daily_part.rename(columns={"date": "날짜"}, inplace=True)
                         daily_results.append(daily_part)
+
+                        # ===== 1-2) 방영 직전 7일 결과 추출 =====
+                        pre_bc_start = start_dt - pd.Timedelta(days=7)
+                        pre_bc_end = start_dt - pd.Timedelta(days=1)
+                        pre_bc_part = target_df[
+                            (target_df["date_dt"] >= pre_bc_start) & 
+                            (target_df["date_dt"] <= pre_bc_end)
+                        ].copy()
+                        if not pre_bc_part.empty:
+                            pre_bc_part = pre_bc_part[["드라마명", "date", "요일", "전체 검색량"]]
+                            pre_bc_part.rename(columns={"date": "날짜"}, inplace=True)
+                            pre_bc_results.append(pre_bc_part)
                         
                         # ===== 2) 주차별 결과 구성 (W-6, W-5 ... 형태 표기) =====
                         target_df['week_start'] = target_df['date_dt'] - pd.to_timedelta(target_df['date_dt'].dt.dayofweek, unit='d')
@@ -382,21 +395,29 @@ if page_selection == "어드민 데이터 추출":
                     except Exception as e:
                         st.error(f"[{kw}] 조회 중 에러: {str(e)}")
                         
-                # 추출 완료 후 메모리에 엑셀 파일 쓰기
+                # ===== 추출 완료 후 메모리에 엑셀 파일 쓰기 =====
                 if daily_results and weekly_results:
                     final_daily_df = pd.concat(daily_results, ignore_index=True)
                     final_weekly_df = pd.concat(weekly_results, ignore_index=True)
+                    if pre_bc_results:
+                        final_pre_bc_df = pd.concat(pre_bc_results, ignore_index=True)
+                    else:
+                        final_pre_bc_df = pd.DataFrame()
                     
                     output = io.BytesIO()
                     with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
                         final_daily_df.to_excel(writer, sheet_name="일자별 전체검색량", index=False)
                         final_weekly_df.to_excel(writer, sheet_name="주차별 전체검색량", index=False)
+                        if not final_pre_bc_df.empty:
+                            final_pre_bc_df.to_excel(writer, sheet_name="방영직전7일", index=False)
                         
                         # 엑셀 셀 천단위 콤마 포맷팅
                         workbook = writer.book
                         format_comma = workbook.add_format({'num_format': '#,##0'})
                         writer.sheets['일자별 전체검색량'].set_column('D:D', 15, format_comma)
                         writer.sheets['주차별 전체검색량'].set_column('D:D', 15, format_comma)
+                        if not final_pre_bc_df.empty:
+                            writer.sheets['방영직전7일'].set_column('D:D', 15, format_comma)
                         
                     st.success("데이터 일괄 추출이 완료되었습니다! 아래 버튼을 눌러 다운로드하세요.")
                     st.download_button(
