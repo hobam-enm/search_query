@@ -362,14 +362,15 @@ if page_selection == "어드민 데이터 추출":
                         daily_part.rename(columns={"date": "날짜"}, inplace=True)
                         daily_results.append(daily_part)
                         
-                        # 2) 주차별 결과 구성 (W-6, W-5 ... 형태 표기)
+                        # ===== 2) 주차별 결과 구성 (W-6, W-5 ... 형태 표기) =====
                         target_df['week_start'] = target_df['date_dt'] - pd.to_timedelta(target_df['date_dt'].dt.dayofweek, unit='d')
                         target_df['relative_weeks'] = ((target_df['week_start'] - start_monday).dt.days // 7)
                         
+                        # [수정된 부분] 방영시작주를 W+1로, 이후 주차는 1씩 더해서 표기 (W0 없음)
                         def get_week_label(w):
                             if w < 0: return f"W{w}"
-                            elif w == 0: return "W0 (방영시작주)"
-                            else: return f"W+{w}"
+                            elif w == 0: return "W+1 (방영시작주)"
+                            else: return f"W+{w+1}"
                             
                         target_df['주차 표기'] = target_df['relative_weeks'].apply(get_week_label)
                         target_df['주간 시작일'] = target_df['week_start'].dt.strftime("%Y-%m-%d")
